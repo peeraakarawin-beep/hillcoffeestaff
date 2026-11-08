@@ -1,1010 +1,676 @@
+'use strict';
 /* ============================================================
-   Employee Time Attendance System — app.js
-   Vanilla JS, face-api.js, localStorage
+   Employee Time Attendance — app.js
+   Photo-based check-in/out with timestamp watermark
+   Vanilla JS + localStorage only, no dependencies
    ============================================================ */
 
-'use strict';
+// ---- STORAGE KEYS ----
+const KEY_EMP  = 'att_employees';
+const KEY_REC  = 'att_records';
 
-// ============================================================
-// CONSTANTS & CONFIG
-// ============================================================
-const MODELS_URL = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
-const THRESHOLD = 0.45;       // Face recognition distance threshold
-const COOLDOWN_MS = 60000;    // 1 minute cooldown between scans
-const CAPTURE_COUNT = 5;      // Number of captures for registration
-
-const STORAGE_KEYS = {
-  employees: 'att_employees',
-  records: 'att_records',
-  settings: 'att_settings',
-};
-
-// ============================================================
-// STATE
-// ============================================================
-let modelsLoaded = false;
-let scanStream = null;         // MediaStream for scan tab
-let regStream = null;          // MediaStream for face registration
+// ---- STATE ----
+let employees = [];
+let records   = [];
+let stream    = null;        // MediaStream
 let currentPage = 'scan';
-let registeringEmpId = null;
-let captureCount = 0;
-let capturedDescriptors = [];
-let scanCooldowns = {};        // empId → timestamp of last scan
-let dateRangeDays = 7;
-let scanProcessing = false;
+let pendingCapture = null;   // { dataUrl, type, empId, ts }
+let historyDays = 7;
+let historyFrom = '';
+let historyTo   = '';
 
-// ============================================================
-// STORAGE HELPERS
-// ============================================================
-function loadData(key) {
-  try {
-    return JSON.parse(localStorage.getItem(key)) || [];
-  } catch { return []; }
+// ---- STORAGE ----
+function loadAll() {
+  try { employees = JSON.parse(localStorage.getItem(KEY_EMP)) || []; } catch { employees = []; }
+  try { records   = JSON.parse(localStorage.getItem(KEY_REC)) || []; } catch { records = []; }
 }
-function saveData(key, data) {
-  localStorage.setItem(key, JSON.stringify(data));
-}
-function getEmployees() { return loadData(STORAGE_KEYS.employees); }
-function getRecords() { return loadData(STORAGE_KEYS.records); }
-function saveEmployees(data) { saveData(STORAGE_KEYS.employees, data); }
-function saveRecords(data) { saveData(STORAGE_KEYS.records, data); }
+function saveEmp() { localStorage.setItem(KEY_EMP, JSON.stringify(employees)); }
+function saveRec() { localStorage.setItem(KEY_REC, JSON.stringify(records)); }
 
-// ============================================================
-// UTILITY HELPERS
-// ============================================================
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-}
-
+// ---- UTILS ----
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 function todayStr() {
   const d = new Date();
-  return d.getFullYear() + '-' +
-    String(d.getMonth() + 1).padStart(2, '0') + '-' +
-    String(d.getDate()).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate());
 }
-
-function formatTime(ts) {
+function pad(n) { return String(n).padStart(2,'0'); }
+function tsToTime(ts) {
   const d = new Date(ts);
-  return String(d.getHours()).padStart(2, '0') + ':' +
-    String(d.getMinutes()).padStart(2, '0') + ':' +
-    String(d.getSeconds()).padStart(2, '0');
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
 }
-
-function formatDate(dateStr) {
-  const d = new Date(dateStr + 'T00:00:00');
-  return d.toLocaleDateString('th-TH', {
-    year: 'numeric', month: 'long', day: 'numeric'
-  });
+function tsToDate(ts) {
+  const d = new Date(ts);
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate());
 }
-
-function thaiDateTime(date) {
+function thaiDate(dateStr) {
+  const months = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.',
+    'ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+  const [y, m, day] = dateStr.split('-').map(Number);
+  return `${day} ${months[m-1]} ${y+543}`;
+}
+function thaiDateFull(d) {
   const days = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
   const months = ['มกราคม','กุมภาพันธ์','มีนาคม','เมษายน','พฤษภาคม','มิถุนายน',
     'กรกฎาคม','สิงหาคม','กันยายน','ตุลาคม','พฤศจิกายน','ธันวาคม'];
-  const d = date || new Date();
-  const buddhistYear = d.getFullYear() + 543;
-  return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${buddhistYear}`;
+  const now = d || new Date();
+  return `วัน${days[now.getDay()]}ที่ ${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()+543}`;
 }
-
 function getInitials(name) {
   if (!name) return '?';
-  const parts = name.trim().split(' ');
-  if (parts.length >= 2) return parts[0][0] + parts[1][0];
-  return name[0];
+  const p = name.trim().split(/\s+/);
+  return p.length >= 2 ? (p[0][0] + p[1][0]) : name[0];
+}
+function diffHours(inTs, outTs) {
+  const ms = outTs - inTs;
+  if (ms <= 0) return '-';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return `${h}ชม. ${pad(m)}น.`;
 }
 
-// ============================================================
-// CLOCK
-// ============================================================
-function updateClock() {
+// ---- CLOCK ----
+function startClock() {
+  function tick() {
+    const now = new Date();
+    const timeStr = pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+    const shortTime = pad(now.getHours()) + ':' + pad(now.getMinutes());
+    const el = document.getElementById('clock-time');
+    const dateEl = document.getElementById('clock-date');
+    const hClock = document.getElementById('header-clock');
+    const hDate = document.getElementById('header-date');
+    if (el) el.textContent = timeStr;
+    if (dateEl) dateEl.textContent = thaiDateFull(now);
+    if (hClock) hClock.textContent = shortTime;
+    if (hDate) hDate.textContent = thaiDateFull(now);
+  }
+  tick();
+  setInterval(tick, 1000);
+}
+
+// ---- TOAST ----
+function showToast(msg, type = 'info', dur = 3000) {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  const icons = { success:'✅', error:'❌', warning:'⚠️', info:'ℹ️' };
+  t.innerHTML = `<span>${icons[type]||''}</span><span>${msg}</span>`;
+  c.appendChild(t);
+  setTimeout(() => {
+    t.style.animation = 'toastOut .3s ease forwards';
+    setTimeout(() => t.remove(), 300);
+  }, dur);
+}
+
+// ---- CAMERA ----
+async function startCamera() {
+  const video = document.getElementById('camera-video');
+  const statusDot = document.querySelector('.cam-status-dot');
+  const statusText = document.getElementById('cam-status-text');
+  if (statusText) statusText.textContent = 'กำลังเปิดกล้อง...';
+
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 960 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    if (statusDot) statusDot.className = 'cam-status-dot ready';
+    if (statusText) statusText.textContent = 'กล้องพร้อมใช้งาน — กดปุ่มเพื่อถ่ายรูปลงเวลา';
+    document.getElementById('btn-checkin').disabled = false;
+    document.getElementById('btn-checkout').disabled = false;
+  } catch (err) {
+    if (statusText) statusText.textContent = 'ไม่สามารถเปิดกล้องได้ — กรุณาอนุญาตการใช้กล้อง';
+    showToast('ไม่สามารถเปิดกล้องได้: ' + err.message, 'error', 5000);
+  }
+}
+function stopCamera() {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+}
+
+// ---- PHOTO CAPTURE WITH TIMESTAMP STAMP ----
+function captureWithStamp(empName, type) {
+  const video = document.getElementById('camera-video');
+  const canvas = document.createElement('canvas');
+  canvas.width  = video.videoWidth  || 640;
+  canvas.height = video.videoHeight || 480;
+  const ctx = canvas.getContext('2d');
+
+  // Mirror (flip horizontally to match preview)
+  ctx.save();
+  ctx.translate(canvas.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
   const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  const ss = String(now.getSeconds()).padStart(2, '0');
-  const timeStr = `${hh}:${mm}:${ss}`;
-  const shortTime = `${hh}:${mm}`;
+  const dateStr = `${now.getDate()} ${['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][now.getMonth()]} ${now.getFullYear()+543}`;
+  const timeStr = pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+  const typeLabel = type === 'in' ? '🟢 เข้างาน' : '🔴 ออกงาน';
 
-  const clockEl = document.getElementById('clock-time');
-  const clockDateEl = document.getElementById('clock-date');
-  const headerTime = document.getElementById('current-time-header');
+  // ---- Stamp bar at bottom ----
+  const barH = Math.round(canvas.height * 0.14);
+  const barY = canvas.height - barH;
 
-  if (clockEl) clockEl.textContent = timeStr;
-  if (clockDateEl) clockDateEl.textContent = thaiDateTime(now);
-  if (headerTime) headerTime.textContent = shortTime;
+  // Semi-transparent dark gradient bar
+  const grad = ctx.createLinearGradient(0, barY, 0, canvas.height);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(0.3, 'rgba(0,0,0,0.75)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.88)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, barY - Math.round(barH * 0.5), canvas.width, barH + Math.round(barH * 0.5));
+
+  const baseFontSize = Math.round(canvas.height / 24);
+  const smFontSize   = Math.round(canvas.height / 30);
+
+  // Type badge (top-left corner)
+  const badgeH = Math.round(canvas.height / 14);
+  const badgePad = Math.round(canvas.width / 40);
+  ctx.fillStyle = type === 'in' ? 'rgba(22,163,74,0.9)' : 'rgba(220,38,38,0.9)';
+  const badgeW = Math.round(canvas.width * 0.26);
+  roundRect(ctx, badgePad, badgePad, badgeW, badgeH, 6);
+  ctx.fill();
+
+  ctx.fillStyle = 'white';
+  ctx.font = `600 ${smFontSize}px Prompt, sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(type === 'in' ? '● เข้างาน' : '● ออกงาน', badgePad + 10, badgePad + badgeH / 2);
+
+  // Employee name (bottom bar, left)
+  const textY1 = barY + Math.round(barH * 0.18);
+  const textY2 = barY + Math.round(barH * 0.6);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+
+  ctx.font = `600 ${baseFontSize}px Prompt, sans-serif`;
+  ctx.fillStyle = 'white';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 4;
+  ctx.fillText(empName, 14, textY1);
+
+  ctx.font = `400 ${smFontSize}px Prompt, sans-serif`;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText(dateStr, 14, textY2);
+
+  // Time (bottom bar, right) — large
+  const timeFontSize = Math.round(canvas.height / 16);
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.font = `700 ${timeFontSize}px Prompt, sans-serif`;
+  ctx.fillStyle = 'white';
+  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur = 6;
+  ctx.fillText(timeStr, canvas.width - 14, barY + barH * 0.5);
+
+  ctx.shadowBlur = 0;
+
+  return { dataUrl: canvas.toDataURL('image/jpeg', 0.88), ts: now.getTime() };
 }
 
-// ============================================================
-// TOAST NOTIFICATIONS
-// ============================================================
-function showToast(msg, type = 'info', duration = 3000) {
-  const container = document.getElementById('toast-container');
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-
-  const icons = {
-    success: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:#10b981;flex-shrink:0"><polyline points="20 6 9 17 4 12"/></svg>',
-    error: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:#ef4444;flex-shrink:0"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
-    warning: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:#f59e0b;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
-    info: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:#3b82f6;flex-shrink:0"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
-  };
-
-  toast.innerHTML = `${icons[type] || icons.info}<span>${msg}</span>`;
-  container.appendChild(toast);
-
-  setTimeout(() => {
-    toast.classList.add('fade-out');
-    setTimeout(() => toast.remove(), 300);
-  }, duration);
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
 }
 
-// ============================================================
-// MODAL HELPERS
-// ============================================================
-function openModal(id) {
-  document.getElementById(id).classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
-}
-function closeModal(id) {
-  document.getElementById(id).classList.add('hidden');
-  document.body.style.overflow = '';
-}
-function closeModalOnBackdrop(event, id) {
-  if (event.target === event.currentTarget) closeModal(id);
-}
+// ---- SCAN ACTIONS ----
+function handleScan(type) {
+  const sel = document.getElementById('scan-emp-select');
+  const empId = sel.value;
+  if (!empId) { showToast('กรุณาเลือกพนักงานก่อน', 'warning'); return; }
 
-// ============================================================
-// PAGE NAVIGATION
-// ============================================================
-function switchPage(pageName, navBtn) {
-  // Hide all pages
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  const video = document.getElementById('camera-video');
+  if (!video.srcObject) { showToast('กล้องยังไม่พร้อม', 'error'); return; }
 
-  // Show target page
-  document.getElementById('page-' + pageName).classList.add('active');
-  if (navBtn) navBtn.classList.add('active');
-
-  currentPage = pageName;
-
-  if (pageName === 'scan') {
-    startScanCamera();
-    renderTodayRecords();
-  } else {
-    stopScanCamera();
-    if (pageName === 'employees') renderEmployeeList();
-    if (pageName === 'reports') {
-      renderReport();
-      populateReportEmpFilter();
-    }
-  }
-}
-
-// ============================================================
-// CAMERA MANAGEMENT
-// ============================================================
-async function startScanCamera() {
-  const video = document.getElementById('scan-video');
-  if (scanStream) {
-    video.srcObject = scanStream;
-    return;
-  }
-  try {
-    scanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-      audio: false
-    });
-    video.srcObject = scanStream;
-    setScanStatus('กล้องพร้อมใช้งาน', 'active');
-  } catch (err) {
-    console.error('Camera error:', err);
-    setScanStatus('ไม่สามารถเข้าถึงกล้องได้', 'error');
-    showToast('ไม่สามารถเข้าถึงกล้องได้ กรุณาอนุญาตการใช้งานกล้อง', 'error');
-  }
-}
-
-function stopScanCamera() {
-  if (scanStream) {
-    scanStream.getTracks().forEach(t => t.stop());
-    scanStream = null;
-  }
-}
-
-async function startRegCamera() {
-  const video = document.getElementById('reg-video');
-  try {
-    regStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-      audio: false
-    });
-    video.srcObject = regStream;
-  } catch (err) {
-    console.error('Reg camera error:', err);
-    showToast('ไม่สามารถเข้าถึงกล้องได้', 'error');
-    closeModal('modal-face-reg');
-  }
-}
-
-function stopRegCamera() {
-  if (regStream) {
-    regStream.getTracks().forEach(t => t.stop());
-    regStream = null;
-  }
-}
-
-function setScanStatus(text, state) {
-  const dot = document.querySelector('#camera-status .status-dot');
-  const textEl = document.getElementById('camera-status-text');
-  if (dot) {
-    dot.className = 'status-dot ' + state;
-  }
-  if (textEl) textEl.textContent = text;
-}
-
-// ============================================================
-// FACE API LOADING
-// ============================================================
-async function loadFaceModels() {
-  setLoadingStatus('กำลังโหลด Face Recognition Models...', 20);
-
-  try {
-    await Promise.all([
-      faceapi.nets.ssdMobilenetv1.loadFromUri(MODELS_URL),
-      faceapi.nets.faceLandmark68Net.loadFromUri(MODELS_URL),
-      faceapi.nets.faceRecognitionNet.loadFromUri(MODELS_URL),
-    ]);
-    modelsLoaded = true;
-    setLoadingStatus('โหลด Models สำเร็จ!', 100);
-    return true;
-  } catch (err) {
-    console.error('Model load error:', err);
-    setLoadingStatus('โหลด Models ไม่สำเร็จ — กรุณาเชื่อมต่ออินเทอร์เน็ต', 0);
-    document.getElementById('loading-hint').textContent =
-      'ระบบต้องการอินเทอร์เน็ตเพื่อโหลด Face AI Models ครั้งแรก';
-    return false;
-  }
-}
-
-function setLoadingStatus(text, progress) {
-  const statusEl = document.getElementById('loading-status');
-  const barEl = document.getElementById('loading-bar-fill');
-  if (statusEl) statusEl.textContent = text;
-  if (barEl) barEl.style.width = progress + '%';
-}
-
-// ============================================================
-// FACE RECOGNITION — SCAN
-// ============================================================
-async function handleScan(type) {
-  if (!modelsLoaded) {
-    showToast('กำลังโหลด Face Models กรุณารอสักครู่...', 'warning');
-    return;
-  }
-  if (scanProcessing) return;
-
-  const employees = getEmployees().filter(e => e.descriptor && e.descriptor.length > 0);
-  if (employees.length === 0) {
-    showToast('ยังไม่มีพนักงานที่ลงทะเบียนใบหน้า', 'warning');
-    return;
-  }
-
-  const video = document.getElementById('scan-video');
-  const canvas = document.getElementById('scan-canvas');
-  const wrapper = document.querySelector('.camera-section .camera-wrapper');
-
-  if (!video.srcObject) {
-    showToast('กรุณาเปิดกล้องก่อน', 'warning');
-    return;
-  }
-
-  scanProcessing = true;
-  wrapper.classList.add('scanning');
-  setScanStatus('กำลังสแกนใบหน้า...', 'scanning');
-
-  // Disable buttons
-  document.getElementById('btn-scan-in').disabled = true;
-  document.getElementById('btn-scan-out').disabled = true;
-
-  try {
-    const displaySize = { width: video.videoWidth, height: video.videoHeight };
-    if (displaySize.width === 0) {
-      showToast('กล้องยังไม่พร้อม กรุณารอสักครู่', 'warning');
-      return;
-    }
-
-    faceapi.matchDimensions(canvas, displaySize);
-
-    const detectionResult = await faceapi
-      .detectSingleFace(video, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
-      .withFaceLandmarks()
-      .withFaceDescriptor();
-
-    if (!detectionResult) {
-      showToast('ไม่พบใบหน้าในกรอบ กรุณาจัดวางใบหน้าให้อยู่ในกรอบ', 'warning');
-      setScanStatus('ไม่พบใบหน้า', 'idle');
-      return;
-    }
-
-    // Draw detection
-    const resized = faceapi.resizeResults(detectionResult, displaySize);
-    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-    faceapi.draw.drawFaceLandmarks(canvas, resized);
-
-    // Compare against all employees
-    const descriptor = detectionResult.descriptor;
-    let bestMatch = null;
-    let bestDistance = Infinity;
-
-    for (const emp of employees) {
-      const empDescriptor = new Float32Array(emp.descriptor);
-      const distance = faceapi.euclideanDistance(descriptor, empDescriptor);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestMatch = emp;
-      }
-    }
-
-    if (bestDistance <= THRESHOLD && bestMatch) {
-      // Check cooldown
-      const now = Date.now();
-      const lastScan = scanCooldowns[bestMatch.id + '_' + type];
-      if (lastScan && now - lastScan < COOLDOWN_MS) {
-        const waitSec = Math.ceil((COOLDOWN_MS - (now - lastScan)) / 1000);
-        showToast(`${bestMatch.name} ได้สแกน${type === 'in' ? 'เข้า' : 'ออก'}แล้ว กรุณารออีก ${waitSec} วินาที`, 'warning');
-        setScanStatus('ต้องรอก่อนสแกนอีกครั้ง', 'idle');
-        return;
-      }
-
-      // Record scan
-      const record = {
-        id: uid(),
-        empId: bestMatch.id,
-        empName: bestMatch.name,
-        empPosition: bestMatch.position || '',
-        empPhoto: bestMatch.photoData || null,
-        type: type,
-        timestamp: new Date().toISOString(),
-        date: todayStr(),
-      };
-
-      const records = getRecords();
-      records.push(record);
-      saveRecords(records);
-      scanCooldowns[bestMatch.id + '_' + type] = now;
-
-      // Show success overlay
-      showFaceResultOverlay(
-        bestMatch,
-        type === 'in' ? '✓ เข้างานสำเร็จ' : '✓ ออกงานสำเร็จ',
-        formatTime(now),
-        type
-      );
-
-      showToast(
-        `${bestMatch.name} ${type === 'in' ? 'เข้างาน' : 'ออกงาน'} ${formatTime(now)}`,
-        'success', 4000
-      );
-      setScanStatus(`สแกน${type === 'in' ? 'เข้า' : 'ออก'}งาน: ${bestMatch.name}`, 'active');
-      renderTodayRecords();
-
-    } else {
-      showToast(`ไม่พบใบหน้าที่ตรงกัน (ระยะห่าง: ${bestDistance.toFixed(2)})`, 'error');
-      setScanStatus('ไม่พบใบหน้าที่ตรงกัน', 'idle');
-    }
-
-  } catch (err) {
-    console.error('Scan error:', err);
-    showToast('เกิดข้อผิดพลาดในการสแกน: ' + err.message, 'error');
-    setScanStatus('เกิดข้อผิดพลาด', 'error');
-  } finally {
-    scanProcessing = false;
-    wrapper.classList.remove('scanning');
-    document.getElementById('btn-scan-in').disabled = false;
-    document.getElementById('btn-scan-out').disabled = false;
-    setTimeout(() => {
-      const canvas = document.getElementById('scan-canvas');
-      if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-      hideFaceResultOverlay();
-      if (currentPage === 'scan') setScanStatus('กล้องพร้อมใช้งาน', 'active');
-    }, 3000);
-  }
-}
-
-function showFaceResultOverlay(emp, status, time, type) {
-  const overlay = document.getElementById('face-result-overlay');
-  overlay.className = `face-result-overlay ${type === 'in' ? 'success' : ''}`;
-  overlay.innerHTML = `
-    <div style="font-size:2.5rem;">${type === 'in' ? '✅' : '🚪'}</div>
-    <div class="face-result-name">${emp.name}</div>
-    <div class="face-result-time">${time}</div>
-    <div class="face-result-status">${status}</div>
-  `;
-  overlay.classList.remove('hidden');
-}
-
-function hideFaceResultOverlay() {
-  const overlay = document.getElementById('face-result-overlay');
-  if (overlay) overlay.classList.add('hidden');
-}
-
-// ============================================================
-// FACE REGISTRATION
-// ============================================================
-function openFaceRegModal(empId) {
-  const employees = getEmployees();
   const emp = employees.find(e => e.id === empId);
-  if (!emp) return;
+  if (!emp) { showToast('ไม่พบข้อมูลพนักงาน', 'error'); return; }
 
-  registeringEmpId = empId;
-  captureCount = 0;
-  capturedDescriptors = [];
+  const { dataUrl, ts } = captureWithStamp(emp.name, type);
 
-  // Reset UI
-  for (let i = 0; i < 5; i++) {
-    const dot = document.getElementById('dot-' + i);
-    if (dot) dot.className = 'capture-dot';
-  }
-  document.getElementById('reg-status-text').textContent =
-    'จัดวางใบหน้าในกรอบ แล้วกดปุ่มจับภาพ';
-  document.getElementById('btn-capture').innerHTML = `
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-      <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
-    </svg>
-    จับภาพ (0/5)
-  `;
-  document.getElementById('btn-capture').disabled = false;
-
-  // Fill employee info
-  document.getElementById('face-reg-emp-info').innerHTML = `
-    <div class="emp-avatar" style="width:40px;height:40px;font-size:1rem;">
-      ${emp.photoData
-        ? `<img src="${emp.photoData}" alt="${emp.name}" />`
-        : `<span>${getInitials(emp.name)}</span>`}
-    </div>
-    <div>
-      <div class="emp-name">${emp.name}</div>
-      <div style="font-size:0.75rem;color:var(--text-secondary);">${emp.position || ''} · ${emp.empNo || ''}</div>
-    </div>
-  `;
-
-  openModal('modal-face-reg');
-  startRegCamera();
+  pendingCapture = { dataUrl, type, empId, empName: emp.name, ts };
+  openPreviewModal(emp, type, dataUrl, ts);
 }
 
-async function captureForRegistration() {
-  if (!modelsLoaded) {
-    showToast('Face Models ยังโหลดไม่เสร็จ', 'warning');
-    return;
-  }
-  if (captureCount >= CAPTURE_COUNT) return;
+function openPreviewModal(emp, type, dataUrl, ts) {
+  const modal = document.getElementById('modal-preview');
+  const title = document.getElementById('preview-title');
+  const empInfo = document.getElementById('preview-emp-info');
+  const img = document.getElementById('preview-img');
+  const tsEl = document.getElementById('preview-timestamp');
 
-  const video = document.getElementById('reg-video');
-  const dot = document.getElementById('dot-' + captureCount);
+  title.textContent = type === 'in' ? '📸 ยืนยันเข้างาน' : '📸 ยืนยันออกงาน';
+  empInfo.textContent = `${emp.name}${emp.position ? ' · ' + emp.position : ''}`;
+  img.src = dataUrl;
+  const d = new Date(ts);
+  tsEl.textContent = `${thaiDateFull(d)}  ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} น.`;
 
-  if (dot) dot.className = 'capture-dot capturing';
-  document.getElementById('reg-status-text').textContent = 'กำลังจับภาพ...';
-  document.getElementById('btn-capture').disabled = true;
-
-  try {
-    const result = await faceapi
-      .detectSingleFace(video, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.5 }))
-      .withFaceLandmarks()
-      .withFaceDescriptor();
-
-    if (!result) {
-      if (dot) dot.className = 'capture-dot';
-      document.getElementById('reg-status-text').textContent = 'ไม่พบใบหน้า กรุณาลองใหม่';
-      showToast('ไม่พบใบหน้าในกรอบ', 'warning');
-      document.getElementById('btn-capture').disabled = false;
-      return;
-    }
-
-    capturedDescriptors.push(Array.from(result.descriptor));
-    if (dot) dot.className = 'capture-dot captured';
-    captureCount++;
-
-    // Capture photo for display on first capture
-    if (captureCount === 1) {
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = video.videoWidth;
-      tempCanvas.height = video.videoHeight;
-      const ctx = tempCanvas.getContext('2d');
-      ctx.drawImage(video, 0, 0);
-      // Store temporarily
-      window._regPhotoData = tempCanvas.toDataURL('image/jpeg', 0.7);
-    }
-
-    if (captureCount < CAPTURE_COUNT) {
-      document.getElementById('reg-status-text').textContent =
-        `จับภาพที่ ${captureCount} สำเร็จ กรุณาขยับหน้าเล็กน้อยแล้วจับภาพต่อไป`;
-      document.getElementById('btn-capture').innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
-        </svg>
-        จับภาพ (${captureCount}/5)
-      `;
-      document.getElementById('btn-capture').disabled = false;
-    } else {
-      // All captures done — compute average descriptor
-      document.getElementById('reg-status-text').textContent = 'กำลังประมวลผล...';
-      await finishRegistration();
-    }
-
-  } catch (err) {
-    console.error('Capture error:', err);
-    showToast('เกิดข้อผิดพลาดในการจับภาพ', 'error');
-    if (dot) dot.className = 'capture-dot';
-    document.getElementById('btn-capture').disabled = false;
-  }
+  modal.classList.remove('hidden');
 }
 
-async function finishRegistration() {
-  // Average all descriptors
-  const len = capturedDescriptors[0].length;
-  const avgDescriptor = new Array(len).fill(0);
-  for (const desc of capturedDescriptors) {
-    for (let i = 0; i < len; i++) avgDescriptor[i] += desc[i];
-  }
-  for (let i = 0; i < len; i++) avgDescriptor[i] /= capturedDescriptors.length;
+function confirmSave() {
+  if (!pendingCapture) return;
+  const { dataUrl, type, empId, empName, ts } = pendingCapture;
 
-  // Save to employee
-  const employees = getEmployees();
-  const idx = employees.findIndex(e => e.id === registeringEmpId);
-  if (idx !== -1) {
-    employees[idx].descriptor = avgDescriptor;
-    if (window._regPhotoData) {
-      employees[idx].photoData = window._regPhotoData;
-      window._regPhotoData = null;
-    }
-    saveEmployees(employees);
-  }
+  const rec = {
+    id: uid(),
+    empId,
+    empName,
+    type,            // 'in' | 'out'
+    ts,              // milliseconds
+    date: tsToDate(ts),
+    photo: dataUrl
+  };
+  records.push(rec);
+  saveRec();
 
-  document.getElementById('reg-status-text').textContent = '✅ ลงทะเบียนใบหน้าสำเร็จ!';
-  showToast('ลงทะเบียนใบหน้าสำเร็จ!', 'success');
+  document.getElementById('modal-preview').classList.add('hidden');
+  pendingCapture = null;
 
-  setTimeout(() => {
-    closeFaceRegModal();
-    renderEmployeeList();
-  }, 1200);
+  const typeLabel = type === 'in' ? 'เข้างาน' : 'ออกงาน';
+  showScanResult(`✅ บันทึก${typeLabel}สำเร็จ — ${empName}  ${tsToTime(ts)}`, 'success');
+  renderTodayLog();
+  showToast(`บันทึก${typeLabel}สำเร็จ — ${empName}`, 'success');
 }
 
-function closeFaceRegModal() {
-  stopRegCamera();
-  registeringEmpId = null;
-  captureCount = 0;
-  capturedDescriptors = [];
-  window._regPhotoData = null;
-  closeModal('modal-face-reg');
+function showScanResult(msg, cls) {
+  const el = document.getElementById('scan-result');
+  el.textContent = msg;
+  el.className = `scan-result ${cls}`;
+  el.classList.remove('hidden');
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.add('hidden'), 5000);
 }
 
-// ============================================================
-// EMPLOYEE MANAGEMENT
-// ============================================================
-function openAddEmployeeModal() {
-  document.getElementById('modal-emp-title').textContent = 'เพิ่มพนักงาน';
-  document.getElementById('emp-id').value = '';
-  document.getElementById('emp-no').value = '';
-  document.getElementById('emp-name').value = '';
-  document.getElementById('emp-position').value = '';
-  openModal('modal-employee');
+// ---- EMPLOYEE SELECT ----
+function populateEmpSelect() {
+  const sel = document.getElementById('scan-emp-select');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— เลือกพนักงาน —</option>';
+  employees.forEach(e => {
+    const opt = document.createElement('option');
+    opt.value = e.id;
+    opt.textContent = `${e.name}${e.empCode ? ' (' + e.empCode + ')' : ''}`;
+    sel.appendChild(opt);
+  });
+  sel.value = prev || '';
 }
 
-function openEditEmployeeModal(empId) {
-  const emp = getEmployees().find(e => e.id === empId);
-  if (!emp) return;
-  document.getElementById('modal-emp-title').textContent = 'แก้ไขข้อมูลพนักงาน';
-  document.getElementById('emp-id').value = emp.id;
-  document.getElementById('emp-no').value = emp.empNo || '';
-  document.getElementById('emp-name').value = emp.name || '';
-  document.getElementById('emp-position').value = emp.position || '';
-  openModal('modal-employee');
-}
-
-function saveEmployee() {
-  const id = document.getElementById('emp-id').value;
-  const empNo = document.getElementById('emp-no').value.trim();
-  const name = document.getElementById('emp-name').value.trim();
-  const position = document.getElementById('emp-position').value.trim();
-
-  if (!name) { showToast('กรุณากรอกชื่อพนักงาน', 'error'); return; }
-  if (!empNo) { showToast('กรุณากรอกเลขพนักงาน', 'error'); return; }
-
-  const employees = getEmployees();
-
-  if (id) {
-    // Edit
-    const idx = employees.findIndex(e => e.id === id);
-    if (idx !== -1) {
-      employees[idx] = { ...employees[idx], empNo, name, position };
-      saveEmployees(employees);
-      showToast('แก้ไขข้อมูลพนักงานสำเร็จ', 'success');
-    }
-  } else {
-    // Add
-    const existing = employees.find(e => e.empNo === empNo);
-    if (existing) { showToast('เลขพนักงานนี้มีอยู่แล้ว', 'error'); return; }
-    employees.push({
-      id: uid(), empNo, name, position,
-      descriptor: [],
-      photoData: null,
-      createdAt: new Date().toISOString(),
-    });
-    saveEmployees(employees);
-    showToast('เพิ่มพนักงานสำเร็จ', 'success');
-  }
-
-  closeModal('modal-employee');
-  renderEmployeeList();
-}
-
-function confirmDeleteEmployee(empId) {
-  const emp = getEmployees().find(e => e.id === empId);
-  if (!emp) return;
-  document.getElementById('confirm-message').textContent =
-    `คุณต้องการลบ "${emp.name}" ออกจากระบบหรือไม่? ข้อมูลทั้งหมดจะถูกลบถาวร`;
-  document.getElementById('btn-confirm-action').onclick = () => deleteEmployee(empId);
-  openModal('modal-confirm');
-}
-
-function deleteEmployee(empId) {
-  const employees = getEmployees().filter(e => e.id !== empId);
-  saveEmployees(employees);
-
-  // Also delete records
-  const records = getRecords().filter(r => r.empId !== empId);
-  saveRecords(records);
-
-  closeModal('modal-confirm');
-  renderEmployeeList();
-  showToast('ลบพนักงานสำเร็จ', 'success');
-}
-
-// ============================================================
-// RENDER EMPLOYEE LIST
-// ============================================================
-function renderEmployeeList() {
-  const container = document.getElementById('employee-list');
-  const search = document.getElementById('emp-search').value.toLowerCase();
-  let employees = getEmployees();
-
-  if (search) {
-    employees = employees.filter(e =>
-      e.name.toLowerCase().includes(search) ||
-      (e.empNo || '').toLowerCase().includes(search) ||
-      (e.position || '').toLowerCase().includes(search)
-    );
-  }
-
-  if (employees.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
-          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-          <circle cx="9" cy="7" r="4"/>
-          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-        </svg>
-        <p>${search ? 'ไม่พบพนักงานที่ค้นหา' : 'ยังไม่มีพนักงาน'}</p>
-        ${!search ? '<button class="btn btn-primary btn-sm" onclick="openAddEmployeeModal()">เพิ่มพนักงานคนแรก</button>' : ''}
-      </div>`;
-    return;
-  }
-
-  container.innerHTML = employees.map(emp => {
-    const hasDescriptor = emp.descriptor && emp.descriptor.length > 0;
-    return `
-    <div class="employee-card">
-      <div class="emp-avatar">
-        ${emp.photoData
-          ? `<img src="${emp.photoData}" alt="${emp.name}" />`
-          : `<span>${getInitials(emp.name)}</span>`}
-      </div>
-      <div class="emp-info">
-        <div class="emp-name">${emp.name}</div>
-        <div class="emp-meta">${emp.position || 'ไม่ระบุตำแหน่ง'} · ${emp.empNo || ''}</div>
-        <span class="emp-face-badge ${hasDescriptor ? 'registered' : 'not-registered'}">
-          ${hasDescriptor ? '✓ ลงทะเบียนแล้ว' : '✗ ยังไม่ลงทะเบียนหน้า'}
-        </span>
-      </div>
-      <div class="emp-actions">
-        <button class="btn-face-reg" onclick="openFaceRegModal('${emp.id}')">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-            <circle cx="12" cy="7" r="4"/>
-          </svg>
-          ${hasDescriptor ? 'อัปเดตหน้า' : 'ลงทะเบียนหน้า'}
-        </button>
-        <button class="btn-edit-emp" onclick="openEditEmployeeModal('${emp.id}')">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-          </svg>
-          แก้ไข
-        </button>
-        <button class="btn-delete-emp" onclick="confirmDeleteEmployee('${emp.id}')">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="3 6 5 6 21 6"/>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-          </svg>
-          ลบ
-        </button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-// ============================================================
-// RENDER TODAY RECORDS
-// ============================================================
-function renderTodayRecords() {
-  const container = document.getElementById('today-list');
-  const countEl = document.getElementById('today-count');
+// ---- TODAY LOG ----
+function renderTodayLog() {
+  const wrap = document.getElementById('today-log');
   const today = todayStr();
-  const records = getRecords()
-    .filter(r => r.date === today)
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  const todays = records.filter(r => r.date === today)
+    .sort((a,b) => b.ts - a.ts);
 
-  countEl.textContent = records.length + ' รายการ';
-
-  if (records.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
-          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-          <line x1="16" y1="2" x2="16" y2="6"/>
-          <line x1="8" y1="2" x2="8" y2="6"/>
-          <line x1="3" y1="10" x2="21" y2="10"/>
-        </svg>
-        <p>ยังไม่มีการบันทึกวันนี้</p>
-      </div>`;
+  if (!todays.length) {
+    wrap.innerHTML = '<div class="empty-state">ยังไม่มีการลงเวลาวันนี้</div>';
     return;
   }
-
-  container.innerHTML = records.map(r => `
-    <div class="record-item">
-      <div class="record-avatar">
-        ${r.empPhoto
-          ? `<img src="${r.empPhoto}" alt="${r.empName}" />`
-          : `<span>${getInitials(r.empName)}</span>`}
+  wrap.innerHTML = todays.map(r => `
+    <div class="log-item" onclick="viewPhoto('${r.id}')">
+      <img src="${r.photo}" class="log-thumb" alt="" />
+      <div class="log-info">
+        <div class="log-name">${r.empName}</div>
+        <div class="log-time">${tsToTime(r.ts)}</div>
       </div>
-      <div class="record-info">
-        <div class="record-name">${r.empName}</div>
-        <div class="record-time">${formatTime(r.timestamp)} · ${r.empPosition || ''}</div>
-      </div>
-      <span class="record-type ${r.type}">${r.type === 'in' ? 'เข้างาน' : 'ออกงาน'}</span>
+      <span class="log-badge ${r.type}">${r.type === 'in' ? 'เข้างาน' : 'ออกงาน'}</span>
     </div>
   `).join('');
 }
 
-// ============================================================
-// REPORTS
-// ============================================================
-function setDateRange(days, btn) {
-  document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-
-  const customRange = document.getElementById('custom-date-range');
-  if (days === 'custom') {
-    customRange.classList.remove('hidden');
-    dateRangeDays = 'custom';
-    // Set defaults if empty
-    const now = new Date();
-    const from = document.getElementById('date-from');
-    const to = document.getElementById('date-to');
-    if (!to.value) to.value = now.toISOString().slice(0, 10);
-    if (!from.value) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - 7);
-      from.value = d.toISOString().slice(0, 10);
-    }
-  } else {
-    customRange.classList.add('hidden');
-    dateRangeDays = days;
-  }
-  renderReport();
+// ---- VIEW PHOTO ----
+function viewPhoto(recId) {
+  const r = records.find(x => x.id === recId);
+  if (!r) return;
+  const modal = document.getElementById('modal-view-photo');
+  document.getElementById('view-photo-title').textContent =
+    `${r.empName} — ${r.type === 'in' ? 'เข้างาน' : 'ออกงาน'}`;
+  document.getElementById('view-photo-img').src = r.photo;
+  const d = new Date(r.ts);
+  document.getElementById('view-photo-info').textContent =
+    `${thaiDateFull(d)}  ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} น.`;
+  modal.classList.remove('hidden');
 }
+window.viewPhoto = viewPhoto;
 
-function getDateRangeBounds() {
-  if (dateRangeDays === 'custom') {
-    const from = document.getElementById('date-from').value;
-    const to = document.getElementById('date-to').value;
-    return { from: from || todayStr(), to: to || todayStr() };
+// ---- EMPLOYEES PAGE ----
+function renderEmployees(filter = '') {
+  const wrap = document.getElementById('emp-list');
+  const q = filter.toLowerCase();
+  const list = employees.filter(e =>
+    e.name.toLowerCase().includes(q) ||
+    (e.position||'').toLowerCase().includes(q) ||
+    (e.empCode||'').toLowerCase().includes(q)
+  );
+  if (!list.length) {
+    wrap.innerHTML = '<div class="empty-state" style="padding:40px 0;text-align:center;color:var(--text-light)">ไม่มีข้อมูลพนักงาน<br><small>กดปุ่ม + เพิ่มพนักงาน</small></div>';
+    return;
   }
-  const to = new Date();
-  const from = new Date();
-  from.setDate(from.getDate() - (dateRangeDays - 1));
-  return {
-    from: from.toISOString().slice(0, 10),
-    to: to.toISOString().slice(0, 10),
+  wrap.innerHTML = list.map(e => `
+    <div class="emp-card">
+      <div class="emp-avatar">${getInitials(e.name)}</div>
+      <div class="emp-info">
+        <div class="emp-name">${e.name}</div>
+        <div class="emp-meta">${[e.position, e.dept, e.empCode].filter(Boolean).join(' · ') || '—'}</div>
+      </div>
+      <div class="emp-actions">
+        <button class="icon-btn" title="แก้ไข" onclick="editEmp('${e.id}')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+        <button class="icon-btn danger" title="ลบ" onclick="deleteEmp('${e.id}')">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+        </button>
+      </div>
+    </div>
+  `).join('');
+}
+window.editEmp = function(id) {
+  const e = employees.find(x => x.id === id);
+  if (!e) return;
+  document.getElementById('emp-id').value = e.id;
+  document.getElementById('emp-name').value = e.name;
+  document.getElementById('emp-position').value = e.position || '';
+  document.getElementById('emp-code').value = e.empCode || '';
+  document.getElementById('emp-dept').value = e.dept || '';
+  document.getElementById('modal-emp-title').textContent = 'แก้ไขพนักงาน';
+  document.getElementById('modal-emp').classList.remove('hidden');
+};
+window.deleteEmp = function(id) {
+  const e = employees.find(x => x.id === id);
+  if (!e) return;
+  if (!confirm(`ลบพนักงาน "${e.name}" ใช่หรือไม่?\n(ประวัติการลงเวลาจะยังคงอยู่)`)) return;
+  employees = employees.filter(x => x.id !== id);
+  saveEmp();
+  renderEmployees(document.getElementById('emp-search').value);
+  populateEmpSelect();
+  showToast('ลบพนักงานแล้ว', 'info');
+};
+
+function saveEmployee() {
+  const id  = document.getElementById('emp-id').value;
+  const name = document.getElementById('emp-name').value.trim();
+  if (!name) { showToast('กรุณากรอกชื่อพนักงาน', 'warning'); return; }
+  const data = {
+    id: id || uid(),
+    name,
+    position: document.getElementById('emp-position').value.trim(),
+    empCode: document.getElementById('emp-code').value.trim(),
+    dept: document.getElementById('emp-dept').value.trim(),
+    createdAt: id ? (employees.find(e => e.id===id)?.createdAt || Date.now()) : Date.now()
   };
+  if (id) {
+    employees = employees.map(e => e.id === id ? data : e);
+  } else {
+    employees.push(data);
+  }
+  saveEmp();
+  document.getElementById('modal-emp').classList.add('hidden');
+  renderEmployees(document.getElementById('emp-search').value);
+  populateEmpSelect();
+  showToast(id ? 'แก้ไขข้อมูลแล้ว' : 'เพิ่มพนักงานแล้ว', 'success');
 }
 
-function populateReportEmpFilter() {
-  const sel = document.getElementById('report-emp-filter');
-  const current = sel.value;
-  sel.innerHTML = '<option value="">พนักงานทั้งหมด</option>';
-  getEmployees().forEach(emp => {
-    const opt = document.createElement('option');
-    opt.value = emp.id;
-    opt.textContent = emp.name;
-    if (emp.id === current) opt.selected = true;
-    sel.appendChild(opt);
-  });
-}
-
-function renderReport() {
-  const { from, to } = getDateRangeBounds();
-  const empFilter = document.getElementById('report-emp-filter').value;
-
-  let records = getRecords().filter(r => r.date >= from && r.date <= to);
-  if (empFilter) records = records.filter(r => r.empId === empFilter);
-
-  // Build daily summary per employee
-  const summary = {}; // date+empId → { in, out }
-  for (const r of records) {
-    const key = r.date + '__' + r.empId;
-    if (!summary[key]) {
-      summary[key] = {
-        empId: r.empId, empName: r.empName, date: r.date,
-        inTime: null, outTime: null
-      };
+// ---- HISTORY PAGE ----
+function renderHistory() {
+  let from, to;
+  const today = new Date(); today.setHours(23,59,59,999);
+  if (historyDays > 0) {
+    to = today.getTime();
+    const f = new Date(); f.setDate(f.getDate() - (historyDays - 1)); f.setHours(0,0,0,0);
+    from = f.getTime();
+  } else {
+    if (!historyFrom || !historyTo) {
+      document.getElementById('history-table-wrap').innerHTML =
+        '<div class="empty-state" style="padding:20px">กรุณาเลือกช่วงวันที่</div>';
+      return;
     }
-    if (r.type === 'in') {
-      if (!summary[key].inTime || r.timestamp < summary[key].inTime)
-        summary[key].inTime = r.timestamp;
-    } else {
-      if (!summary[key].outTime || r.timestamp > summary[key].outTime)
-        summary[key].outTime = r.timestamp;
-    }
+    from = new Date(historyFrom + 'T00:00:00').getTime();
+    to   = new Date(historyTo   + 'T23:59:59').getTime();
   }
 
-  const rows = Object.values(summary).sort((a, b) => {
-    if (a.date !== b.date) return b.date.localeCompare(a.date);
-    return a.empName.localeCompare(b.empName);
-  });
+  const filtered = records.filter(r => r.ts >= from && r.ts <= to);
 
   // Stats
-  const empSet = new Set(rows.map(r => r.empId));
-  const daySet = new Set(rows.map(r => r.date));
-  let totalHours = 0;
-  for (const r of rows) {
-    if (r.inTime && r.outTime) {
-      totalHours += (new Date(r.outTime) - new Date(r.inTime)) / 3600000;
-    }
-  }
+  const empSet = new Set(filtered.map(r => r.empId));
+  const daySet = new Set(filtered.map(r => r.date));
+  let totalMs = 0;
+  // pair in/out per emp per day
+  employees.forEach(emp => {
+    const empRecs = filtered.filter(r => r.empId === emp.id);
+    const days = [...new Set(empRecs.map(r => r.date))];
+    days.forEach(d => {
+      const ins  = empRecs.filter(r => r.date === d && r.type === 'in').sort((a,b) => a.ts-b.ts);
+      const outs = empRecs.filter(r => r.date === d && r.type === 'out').sort((a,b) => a.ts-b.ts);
+      if (ins.length && outs.length) {
+        totalMs += Math.max(0, outs[outs.length-1].ts - ins[0].ts);
+      }
+    });
+  });
+  const totalH = Math.floor(totalMs / 3600000);
+  const totalM = Math.floor((totalMs % 3600000) / 60000);
 
-  document.getElementById('stat-employees').textContent = empSet.size;
-  document.getElementById('stat-days').textContent = daySet.size;
-  document.getElementById('stat-hours').textContent = totalHours.toFixed(1);
+  document.getElementById('stats-row').innerHTML = `
+    <div class="stat-card"><div class="stat-num">${empSet.size}</div><div class="stat-label">พนักงาน</div></div>
+    <div class="stat-card"><div class="stat-num">${daySet.size}</div><div class="stat-label">วันที่มีบันทึก</div></div>
+    <div class="stat-card"><div class="stat-num">${totalH}<small style="font-size:14px">ชม.</small></div><div class="stat-label">ชม.ทำงานรวม</div></div>
+  `;
 
-  // Render table
-  const tbody = document.getElementById('report-tbody');
-  if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">ไม่มีข้อมูลในช่วงวันที่เลือก</td></tr>';
+  // Build table rows: group by emp then date
+  const rows = [];
+  const sortedEmps = [...employees].sort((a,b) => a.name.localeCompare(b.name,'th'));
+
+  sortedEmps.forEach(emp => {
+    const empRecs = filtered.filter(r => r.empId === emp.id);
+    if (!empRecs.length) return;
+    const days = [...new Set(empRecs.map(r => r.date))].sort();
+    days.forEach(d => {
+      const dayRecs = empRecs.filter(r => r.date === d);
+      const ins  = dayRecs.filter(r => r.type === 'in').sort((a,b) => a.ts-b.ts);
+      const outs = dayRecs.filter(r => r.type === 'out').sort((a,b) => a.ts-b.ts);
+      const inRec  = ins[0];
+      const outRec = outs[outs.length-1];
+      const hrs = (inRec && outRec) ? diffHours(inRec.ts, outRec.ts) : '—';
+      rows.push({ emp, date: d, inRec, outRec, hrs });
+    });
+  });
+
+  if (!rows.length) {
+    document.getElementById('history-table-wrap').innerHTML =
+      '<div class="empty-state" style="padding:30px">ไม่มีข้อมูลในช่วงที่เลือก</div>';
     return;
   }
 
-  tbody.innerHTML = rows.map(r => {
-    const hours = (r.inTime && r.outTime)
-      ? ((new Date(r.outTime) - new Date(r.inTime)) / 3600000).toFixed(1)
-      : '-';
-    return `
-      <tr>
-        <td><strong>${r.empName}</strong></td>
-        <td>${formatDate(r.date)}</td>
-        <td class="in-badge">${r.inTime ? formatTime(r.inTime) : '-'}</td>
-        <td class="out-badge">${r.outTime ? formatTime(r.outTime) : '-'}</td>
-        <td>${hours !== '-' ? `<span class="hours-badge">${hours} ชม.</span>` : '-'}</td>
-      </tr>`;
-  }).join('');
+  document.getElementById('history-table-wrap').innerHTML = `
+    <table class="att-table">
+      <thead>
+        <tr>
+          <th>พนักงาน</th>
+          <th>วันที่</th>
+          <th>เข้างาน</th>
+          <th>ออกงาน</th>
+          <th>ชม.</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td>${r.emp.name}</td>
+            <td style="white-space:nowrap">${thaiDate(r.date)}</td>
+            <td class="time-in">
+              ${r.inRec
+                ? `${tsToTime(r.inRec.ts)}<br><img src="${r.inRec.photo}" class="photo-thumb" onclick="viewPhoto('${r.inRec.id}')" title="ดูรูป" />`
+                : '—'}
+            </td>
+            <td class="time-out">
+              ${r.outRec
+                ? `${tsToTime(r.outRec.ts)}<br><img src="${r.outRec.photo}" class="photo-thumb" onclick="viewPhoto('${r.outRec.id}')" title="ดูรูป" />`
+                : '—'}
+            </td>
+            <td class="hours-cell">${r.hrs}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
 }
 
-// ============================================================
-// CSV EXPORT
-// ============================================================
+// ---- EXPORT CSV ----
 function exportCSV() {
-  const { from, to } = getDateRangeBounds();
-  const empFilter = document.getElementById('report-emp-filter').value;
+  const BOM = '\uFEFF';
+  const header = ['ชื่อพนักงาน','รหัสพนักงาน','ตำแหน่ง','วันที่','เวลาเข้างาน','เวลาออกงาน','ชม.ทำงาน'];
+  const lines = [header.join(',')];
 
-  let records = getRecords().filter(r => r.date >= from && r.date <= to);
-  if (empFilter) records = records.filter(r => r.empId === empFilter);
+  const empMap = {};
+  employees.forEach(e => empMap[e.id] = e);
 
-  const summary = {};
-  for (const r of records) {
-    const key = r.date + '__' + r.empId;
-    if (!summary[key]) {
-      summary[key] = { empId: r.empId, empName: r.empName, date: r.date, inTime: null, outTime: null };
-    }
-    if (r.type === 'in') {
-      if (!summary[key].inTime || r.timestamp < summary[key].inTime)
-        summary[key].inTime = r.timestamp;
-    } else {
-      if (!summary[key].outTime || r.timestamp > summary[key].outTime)
-        summary[key].outTime = r.timestamp;
-    }
-  }
+  // group
+  const grouped = {};
+  records.forEach(r => {
+    const key = r.empId + '_' + r.date;
+    if (!grouped[key]) grouped[key] = { empId: r.empId, date: r.date, ins: [], outs: [] };
+    if (r.type === 'in') grouped[key].ins.push(r);
+    else grouped[key].outs.push(r);
+  });
 
-  const rows = Object.values(summary).sort((a, b) => a.date.localeCompare(b.date));
-  const csvLines = ['\uFEFFชื่อพนักงาน,วันที่,เวลาเข้างาน,เวลาออกงาน,ชั่วโมงทำงาน'];
-
-  for (const r of rows) {
-    const hours = (r.inTime && r.outTime)
-      ? ((new Date(r.outTime) - new Date(r.inTime)) / 3600000).toFixed(2)
-      : '';
-    csvLines.push([
-      `"${r.empName}"`,
-      r.date,
-      r.inTime ? formatTime(r.inTime) : '',
-      r.outTime ? formatTime(r.outTime) : '',
-      hours,
+  Object.values(grouped).sort((a,b) => a.date.localeCompare(b.date)).forEach(g => {
+    const emp = empMap[g.empId] || { name: g.empId, empCode:'', position:'' };
+    const ins  = g.ins.sort((a,b)=>a.ts-b.ts);
+    const outs = g.outs.sort((a,b)=>a.ts-b.ts);
+    const inTime  = ins[0]  ? tsToTime(ins[0].ts)  : '';
+    const outTime = outs[outs.length-1] ? tsToTime(outs[outs.length-1].ts) : '';
+    const hrs = (ins[0] && outs.length) ? diffHours(ins[0].ts, outs[outs.length-1].ts) : '';
+    lines.push([
+      `"${emp.name}"`, `"${emp.empCode||''}"`, `"${emp.position||''}"`,
+      `"${thaiDate(g.date)}"`, inTime, outTime, `"${hrs}"`
     ].join(','));
-  }
+  });
 
-  const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
+  const blob = new Blob([BOM + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
   const a = document.createElement('a');
-  a.href = url;
-  a.download = `attendance_${from}_${to}.csv`;
+  a.href = URL.createObjectURL(blob);
+  a.download = `attendance_${todayStr()}.csv`;
   a.click();
-  URL.revokeObjectURL(url);
-  showToast('ส่งออก CSV สำเร็จ', 'success');
+  showToast('Export CSV สำเร็จ', 'success');
 }
 
-// ============================================================
-// INIT
-// ============================================================
-async function init() {
-  // Start clock
-  updateClock();
-  setInterval(updateClock, 1000);
+// ---- NAVIGATION ----
+function goPage(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  document.querySelector(`.nav-btn[data-page="${page}"]`).classList.add('active');
+  currentPage = page;
 
-  // Show loading progress
-  setLoadingStatus('กำลังเตรียมระบบ...', 10);
-  await sleep(300);
-  setLoadingStatus('กำลังโหลด Face Recognition Models...', 30);
-
-  // Load face-api models
-  const loaded = await loadFaceModels();
-
-  if (!loaded) {
-    // Still show app but warn user
-    setLoadingStatus('โหลด Models ไม่สำเร็จ — บางฟีเจอร์อาจไม่ทำงาน', 100);
-    document.getElementById('loading-hint').textContent =
-      'ต้องการอินเทอร์เน็ตเพื่อโหลด AI Models กรุณาเชื่อมต่อแล้วรีโหลดหน้า';
-    await sleep(2500);
+  if (page === 'scan') {
+    startCamera();
+    renderTodayLog();
+    populateEmpSelect();
   } else {
-    setLoadingStatus('เสร็จสิ้น!', 100);
-    await sleep(600);
+    stopCamera();
+    if (page === 'employees') renderEmployees(document.getElementById('emp-search').value);
+    if (page === 'history')   renderHistory();
   }
-
-  // Show app
-  const loadingScreen = document.getElementById('loading-screen');
-  const app = document.getElementById('app');
-  loadingScreen.classList.add('fade-out');
-  setTimeout(() => {
-    loadingScreen.style.display = 'none';
-    app.classList.remove('hidden');
-    // Start scan camera on first load
-    startScanCamera();
-    renderTodayRecords();
-  }, 500);
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ============================================================
-// ENTRY POINT
-// ============================================================
+// ---- INIT ----
 document.addEventListener('DOMContentLoaded', () => {
-  // Check for face-api
-  if (typeof faceapi === 'undefined') {
-    document.getElementById('loading-status').textContent =
-      'ไม่สามารถโหลด face-api.js ได้ กรุณาเชื่อมต่ออินเทอร์เน็ต';
-    document.getElementById('loading-hint').textContent =
-      'โหลดหน้าใหม่เมื่อมีการเชื่อมต่ออินเทอร์เน็ต';
-    document.getElementById('loading-bar-fill').style.background = '#ef4444';
-    return;
-  }
-  init();
+  loadAll();
+  startClock();
+  startCamera();
+  populateEmpSelect();
+  renderTodayLog();
+
+  // Nav buttons
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => goPage(btn.dataset.page));
+  });
+
+  // Scan buttons
+  document.getElementById('btn-checkin').addEventListener('click', () => handleScan('in'));
+  document.getElementById('btn-checkout').addEventListener('click', () => handleScan('out'));
+
+  // Preview modal
+  document.getElementById('modal-preview-close').addEventListener('click', () => {
+    document.getElementById('modal-preview').classList.add('hidden');
+    pendingCapture = null;
+  });
+  document.getElementById('btn-retake').addEventListener('click', () => {
+    document.getElementById('modal-preview').classList.add('hidden');
+    pendingCapture = null;
+  });
+  document.getElementById('btn-confirm-save').addEventListener('click', confirmSave);
+
+  // View photo modal
+  document.getElementById('modal-view-photo-close').addEventListener('click', () => {
+    document.getElementById('modal-view-photo').classList.add('hidden');
+  });
+
+  // Add employee
+  document.getElementById('btn-add-emp').addEventListener('click', () => {
+    document.getElementById('emp-id').value = '';
+    document.getElementById('emp-name').value = '';
+    document.getElementById('emp-position').value = '';
+    document.getElementById('emp-code').value = '';
+    document.getElementById('emp-dept').value = '';
+    document.getElementById('modal-emp-title').textContent = 'เพิ่มพนักงาน';
+    document.getElementById('modal-emp').classList.remove('hidden');
+  });
+  document.getElementById('modal-emp-close').addEventListener('click', () =>
+    document.getElementById('modal-emp').classList.add('hidden'));
+  document.getElementById('modal-emp-cancel').addEventListener('click', () =>
+    document.getElementById('modal-emp').classList.add('hidden'));
+  document.getElementById('modal-emp-save').addEventListener('click', saveEmployee);
+
+  // Employee search
+  document.getElementById('emp-search').addEventListener('input', e =>
+    renderEmployees(e.target.value));
+
+  // History filter chips
+  document.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      historyDays = parseInt(chip.dataset.days, 10);
+      const rangeWrap = document.getElementById('date-range-wrap');
+      if (historyDays === 0) {
+        rangeWrap.classList.remove('hidden');
+      } else {
+        rangeWrap.classList.add('hidden');
+        renderHistory();
+      }
+    });
+  });
+
+  document.getElementById('btn-apply-range').addEventListener('click', () => {
+    historyFrom = document.getElementById('range-from').value;
+    historyTo   = document.getElementById('range-to').value;
+    if (!historyFrom || !historyTo) { showToast('กรุณาเลือกช่วงวันที่', 'warning'); return; }
+    renderHistory();
+  });
+
+  document.getElementById('btn-export-csv').addEventListener('click', exportCSV);
+
+  // Backdrop close
+  document.querySelectorAll('.modal-backdrop').forEach(bd => {
+    bd.addEventListener('click', e => {
+      if (e.target === bd) {
+        bd.classList.add('hidden');
+        if (bd.id === 'modal-preview') pendingCapture = null;
+      }
+    });
+  });
 });

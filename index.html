@@ -3,415 +3,243 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#4f46e5" />
   <title>ระบบลงเวลาพนักงาน</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- Loading Screen -->
-  <div id="loading-screen" class="loading-screen">
-    <div class="loading-content">
-      <div class="loading-logo">
-        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
-          <rect width="64" height="64" rx="16" fill="url(#grad1)"/>
-          <defs>
-            <linearGradient id="grad1" x1="0" y1="0" x2="64" y2="64">
-              <stop offset="0%" stop-color="#4f46e5"/>
-              <stop offset="100%" stop-color="#7c3aed"/>
-            </linearGradient>
-          </defs>
-          <path d="M32 14C32 14 20 20 20 32C20 38.627 25.373 44 32 44C38.627 44 44 38.627 44 32C44 20 32 14 32 14Z" fill="white" opacity="0.9"/>
-          <circle cx="32" cy="32" r="6" fill="url(#grad1)"/>
-        </svg>
-      </div>
-      <h2>ระบบลงเวลาพนักงาน</h2>
-      <p id="loading-status">กำลังโหลดระบบ...</p>
-      <div class="loading-bar">
-        <div class="loading-bar-fill" id="loading-bar-fill"></div>
-      </div>
-      <p class="loading-hint" id="loading-hint"></p>
-    </div>
-  </div>
 
   <!-- App Shell -->
-  <div id="app" class="app hidden">
+  <div id="app" class="app">
+
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
         <div class="app-logo">
-          <svg width="32" height="32" viewBox="0 0 64 64" fill="none">
-            <rect width="64" height="64" rx="12" fill="url(#grad2)"/>
-            <defs>
-              <linearGradient id="grad2" x1="0" y1="0" x2="64" y2="64">
-                <stop offset="0%" stop-color="#4f46e5"/>
-                <stop offset="100%" stop-color="#7c3aed"/>
-              </linearGradient>
-            </defs>
-            <path d="M32 14C32 14 20 20 20 32C20 38.627 25.373 44 32 44C38.627 44 44 38.627 44 32C44 20 32 14 32 14Z" fill="white" opacity="0.9"/>
-            <circle cx="32" cy="32" r="6" fill="url(#grad2)"/>
+          <svg width="30" height="30" viewBox="0 0 30 30" fill="none">
+            <rect width="30" height="30" rx="8" fill="url(#hgrad)"/>
+            <defs><linearGradient id="hgrad" x1="0" y1="0" x2="30" y2="30">
+              <stop offset="0%" stop-color="#6366f1"/><stop offset="100%" stop-color="#8b5cf6"/>
+            </linearGradient></defs>
+            <circle cx="15" cy="11" r="4" fill="white" opacity="0.9"/>
+            <path d="M7 23c0-4.418 3.582-8 8-8s8 3.582 8 8" stroke="white" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.9"/>
           </svg>
         </div>
-        <div>
-          <h1 class="app-title">Time Attendance</h1>
-          <p class="app-subtitle">ระบบลงเวลาพนักงาน</p>
+        <div class="header-title">
+          <h1>ระบบลงเวลาพนักงาน</h1>
+          <span id="header-clock" class="header-clock">00:00</span>
         </div>
       </div>
       <div class="header-right">
-        <div id="current-time-header" class="header-time">00:00</div>
+        <div id="header-date" class="header-date"></div>
       </div>
     </header>
 
-    <!-- Page Content -->
-    <main class="app-content">
-      <!-- ===== TAB: สแกนเวลา ===== -->
-      <section id="page-scan" class="page active">
-        <!-- Clock Display -->
-        <div class="clock-card">
-          <div class="clock-time" id="clock-time">00:00:00</div>
-          <div class="clock-date" id="clock-date">วันอาทิตย์ที่ 1 มกราคม 2566</div>
+    <!-- Main Content -->
+    <main class="main-content" id="main-content">
+
+      <!-- ========== PAGE: SCAN ========== -->
+      <section class="page active" id="page-scan">
+        <div class="clock-block">
+          <div id="clock-time" class="clock-time">00:00:00</div>
+          <div id="clock-date" class="clock-date"></div>
         </div>
 
-        <!-- Camera Area -->
-        <div class="camera-section">
-          <div class="camera-wrapper">
-            <video id="scan-video" autoplay muted playsinline class="camera-video"></video>
-            <canvas id="scan-canvas" class="camera-overlay"></canvas>
-            <div class="camera-frame">
-              <div class="frame-corner tl"></div>
-              <div class="frame-corner tr"></div>
-              <div class="frame-corner bl"></div>
-              <div class="frame-corner br"></div>
-            </div>
-            <div class="scan-line" id="scan-line"></div>
-            <div id="face-result-overlay" class="face-result-overlay hidden"></div>
-          </div>
-
-          <!-- Camera Controls -->
-          <div class="camera-controls">
-            <button id="btn-scan-in" class="btn btn-scan-in" onclick="handleScan('in')">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
-                <polyline points="10 17 15 12 10 7"/>
-                <line x1="15" y1="12" x2="3" y2="12"/>
-              </svg>
-              สแกนเข้างาน
-            </button>
-            <button id="btn-scan-out" class="btn btn-scan-out" onclick="handleScan('out')">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                <polyline points="16 17 21 12 16 7"/>
-                <line x1="21" y1="12" x2="9" y2="12"/>
-              </svg>
-              สแกนออกงาน
-            </button>
-          </div>
-
-          <!-- Camera Status -->
-          <div id="camera-status" class="camera-status">
-            <div class="status-dot idle"></div>
-            <span id="camera-status-text">กล้องพร้อมใช้งาน</span>
+        <!-- Employee Selector -->
+        <div class="card select-card">
+          <label class="field-label">เลือกพนักงาน</label>
+          <div class="select-wrapper">
+            <select id="scan-emp-select" class="styled-select">
+              <option value="">— เลือกพนักงาน —</option>
+            </select>
+            <svg class="select-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
         </div>
 
-        <!-- Today's Records -->
-        <div class="today-records">
-          <div class="section-header">
-            <h3>บันทึกวันนี้</h3>
-            <span id="today-count" class="badge">0 รายการ</span>
-          </div>
-          <div id="today-list" class="records-list">
-            <div class="empty-state">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
-                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-                <line x1="16" y1="2" x2="16" y2="6"/>
-                <line x1="8" y1="2" x2="8" y2="6"/>
-                <line x1="3" y1="10" x2="21" y2="10"/>
-              </svg>
-              <p>ยังไม่มีการบันทึกวันนี้</p>
+        <!-- Camera + Stamp Preview -->
+        <div class="card camera-card">
+          <div class="camera-wrap" id="camera-wrap">
+            <video id="camera-video" autoplay playsinline muted></video>
+            <canvas id="stamp-canvas" class="stamp-canvas"></canvas>
+            <!-- Stamp overlay shown on canvas -->
+            <div class="cam-corners">
+              <span class="corner tl"></span><span class="corner tr"></span>
+              <span class="corner bl"></span><span class="corner br"></span>
             </div>
+          </div>
+          <div class="cam-status" id="cam-status">
+            <span class="cam-status-dot"></span>
+            <span id="cam-status-text">กำลังเปิดกล้อง...</span>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-row">
+          <button class="btn btn-checkin" id="btn-checkin" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+            ถ่ายรูป <strong>เข้างาน</strong>
+          </button>
+          <button class="btn btn-checkout" id="btn-checkout" disabled>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            ถ่ายรูป <strong>ออกงาน</strong>
+          </button>
+        </div>
+
+        <!-- Result flash -->
+        <div id="scan-result" class="scan-result hidden"></div>
+
+        <!-- Today's log -->
+        <div class="card today-log-card">
+          <div class="card-header">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+            บันทึกวันนี้
+          </div>
+          <div id="today-log" class="today-log">
+            <div class="empty-state">ยังไม่มีการลงเวลาวันนี้</div>
           </div>
         </div>
       </section>
 
-      <!-- ===== TAB: จัดการพนักงาน ===== -->
-      <section id="page-employees" class="page">
-        <div class="page-header-row">
-          <h2 class="page-title">จัดการพนักงาน</h2>
-          <button class="btn btn-primary btn-sm" onclick="openAddEmployeeModal()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
+      <!-- ========== PAGE: EMPLOYEES ========== -->
+      <section class="page" id="page-employees">
+        <div class="page-toolbar">
+          <input type="text" id="emp-search" class="search-input" placeholder="🔍 ค้นหาพนักงาน..." />
+          <button class="btn btn-add" id="btn-add-emp">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             เพิ่มพนักงาน
           </button>
         </div>
-
-        <!-- Search -->
-        <div class="search-box">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-          </svg>
-          <input type="text" id="emp-search" placeholder="ค้นหาพนักงาน..." oninput="renderEmployeeList()" />
-        </div>
-
-        <!-- Employee List -->
-        <div id="employee-list" class="employee-list">
-          <div class="empty-state">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-              <circle cx="9" cy="7" r="4"/>
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-            </svg>
-            <p>ยังไม่มีพนักงาน</p>
-            <button class="btn btn-primary btn-sm" onclick="openAddEmployeeModal()">เพิ่มพนักงานคนแรก</button>
-          </div>
-        </div>
+        <div id="emp-list" class="emp-list"></div>
       </section>
 
-      <!-- ===== TAB: ประวัติ & สรุป ===== -->
-      <section id="page-reports" class="page">
-        <div class="page-header-row">
-          <h2 class="page-title">ประวัติ &amp; สรุป</h2>
-          <button class="btn btn-outline btn-sm" onclick="exportCSV()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-            CSV
-          </button>
-        </div>
-
-        <!-- Date Filter -->
-        <div class="date-filter">
+      <!-- ========== PAGE: HISTORY ========== -->
+      <section class="page" id="page-history">
+        <div class="card filter-card">
+          <div class="filter-label">ช่วงเวลา</div>
           <div class="filter-chips">
-            <button class="chip active" onclick="setDateRange(7, this)">7 วัน</button>
-            <button class="chip" onclick="setDateRange(14, this)">14 วัน</button>
-            <button class="chip" onclick="setDateRange(30, this)">30 วัน</button>
-            <button class="chip" onclick="setDateRange('custom', this)">กำหนดเอง</button>
+            <button class="chip active" data-days="7">7 วัน</button>
+            <button class="chip" data-days="14">14 วัน</button>
+            <button class="chip" data-days="30">30 วัน</button>
+            <button class="chip" data-days="0">กำหนดเอง</button>
           </div>
-          <div id="custom-date-range" class="custom-date-range hidden">
-            <div class="date-inputs">
-              <div class="form-group">
-                <label>วันเริ่มต้น</label>
-                <input type="date" id="date-from" class="form-control" onchange="renderReport()" />
-              </div>
-              <div class="form-group">
-                <label>วันสิ้นสุด</label>
-                <input type="date" id="date-to" class="form-control" onchange="renderReport()" />
-              </div>
-            </div>
+          <div class="date-range-wrap hidden" id="date-range-wrap">
+            <input type="date" id="range-from" class="date-input" />
+            <span>ถึง</span>
+            <input type="date" id="range-to" class="date-input" />
+            <button class="btn btn-sm" id="btn-apply-range">ดู</button>
           </div>
         </div>
 
-        <!-- Summary Stats -->
-        <div class="stats-grid" id="report-stats">
-          <div class="stat-card">
-            <div class="stat-icon purple">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                <circle cx="9" cy="7" r="4"/>
-              </svg>
-            </div>
-            <div class="stat-info">
-              <div class="stat-value" id="stat-employees">0</div>
-              <div class="stat-label">พนักงาน</div>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-icon blue">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-                <line x1="16" y1="2" x2="16" y2="6"/>
-                <line x1="8" y1="2" x2="8" y2="6"/>
-                <line x1="3" y1="10" x2="21" y2="10"/>
-              </svg>
-            </div>
-            <div class="stat-info">
-              <div class="stat-value" id="stat-days">0</div>
-              <div class="stat-label">วันทำงานรวม</div>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-icon green">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/>
-                <polyline points="12 6 12 12 16 14"/>
-              </svg>
-            </div>
-            <div class="stat-info">
-              <div class="stat-value" id="stat-hours">0</div>
-              <div class="stat-label">ชั่วโมงรวม</div>
-            </div>
-          </div>
-        </div>
+        <div class="stats-row" id="stats-row"></div>
 
-        <!-- Employee Filter -->
-        <div class="form-group">
-          <label>กรองตามพนักงาน</label>
-          <select id="report-emp-filter" class="form-control" onchange="renderReport()">
-            <option value="">พนักงานทั้งหมด</option>
-          </select>
-        </div>
-
-        <!-- Report Table -->
-        <div class="report-table-wrapper">
-          <table class="report-table" id="report-table">
-            <thead>
-              <tr>
-                <th>พนักงาน</th>
-                <th>วันที่</th>
-                <th>เข้างาน</th>
-                <th>ออกงาน</th>
-                <th>ชม.</th>
-              </tr>
-            </thead>
-            <tbody id="report-tbody">
-              <tr>
-                <td colspan="5" class="empty-cell">ไม่มีข้อมูล</td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="card">
+          <div class="card-header">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            รายงานการลงเวลา
+            <button class="btn btn-sm btn-export" id="btn-export-csv" style="margin-left:auto">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export CSV
+            </button>
+          </div>
+          <div id="history-table-wrap" class="table-scroll"></div>
         </div>
       </section>
+
     </main>
 
-    <!-- Bottom Navigation -->
+    <!-- Bottom Nav -->
     <nav class="bottom-nav">
-      <button class="nav-item active" onclick="switchPage('scan', this)">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M23 7l-7 5 7 5V7z"/>
-          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-        </svg>
-        <span>สแกนเวลา</span>
+      <button class="nav-btn active" data-page="scan">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        <span>ลงเวลา</span>
       </button>
-      <button class="nav-item" onclick="switchPage('employees', this)">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-          <circle cx="9" cy="7" r="4"/>
-          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-          <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-        </svg>
+      <button class="nav-btn" data-page="employees">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         <span>พนักงาน</span>
       </button>
-      <button class="nav-item" onclick="switchPage('reports', this)">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <line x1="18" y1="20" x2="18" y2="10"/>
-          <line x1="12" y1="20" x2="12" y2="4"/>
-          <line x1="6" y1="20" x2="6" y2="14"/>
-        </svg>
-        <span>รายงาน</span>
+      <button class="nav-btn" data-page="history">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        <span>สรุป</span>
       </button>
     </nav>
-  </div>
 
-  <!-- ===== MODALS ===== -->
+  </div><!-- /app -->
 
-  <!-- Add/Edit Employee Modal -->
-  <div id="modal-employee" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'modal-employee')">
+  <!-- ========== MODAL: ADD / EDIT EMPLOYEE ========== -->
+  <div class="modal-backdrop hidden" id="modal-emp">
     <div class="modal">
       <div class="modal-header">
         <h3 id="modal-emp-title">เพิ่มพนักงาน</h3>
-        <button class="modal-close" onclick="closeModal('modal-employee')">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
+        <button class="modal-close" id="modal-emp-close">&times;</button>
       </div>
       <div class="modal-body">
         <input type="hidden" id="emp-id" />
         <div class="form-group">
-          <label>เลขพนักงาน <span class="required">*</span></label>
-          <input type="text" id="emp-no" class="form-control" placeholder="เช่น EMP001" />
+          <label class="field-label">ชื่อ-นามสกุล <span class="required">*</span></label>
+          <input type="text" id="emp-name" class="form-input" placeholder="เช่น สมชาย ใจดี" />
         </div>
         <div class="form-group">
-          <label>ชื่อ-นามสกุล <span class="required">*</span></label>
-          <input type="text" id="emp-name" class="form-control" placeholder="ชื่อพนักงาน" />
+          <label class="field-label">ตำแหน่ง</label>
+          <input type="text" id="emp-position" class="form-input" placeholder="เช่น พนักงานขาย" />
         </div>
         <div class="form-group">
-          <label>ตำแหน่ง</label>
-          <input type="text" id="emp-position" class="form-control" placeholder="ตำแหน่งงาน" />
+          <label class="field-label">รหัสพนักงาน</label>
+          <input type="text" id="emp-code" class="form-input" placeholder="เช่น EMP001" />
+        </div>
+        <div class="form-group">
+          <label class="field-label">แผนก</label>
+          <input type="text" id="emp-dept" class="form-input" placeholder="เช่น ฝ่ายขาย" />
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-outline" onclick="closeModal('modal-employee')">ยกเลิก</button>
-        <button class="btn btn-primary" onclick="saveEmployee()">บันทึก</button>
+        <button class="btn btn-outline" id="modal-emp-cancel">ยกเลิก</button>
+        <button class="btn btn-primary" id="modal-emp-save">บันทึก</button>
       </div>
     </div>
   </div>
 
-  <!-- Register Face Modal -->
-  <div id="modal-face-reg" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'modal-face-reg')">
-    <div class="modal modal-wide">
+  <!-- ========== MODAL: PHOTO PREVIEW (before save) ========== -->
+  <div class="modal-backdrop hidden" id="modal-preview">
+    <div class="modal modal-photo">
       <div class="modal-header">
-        <h3>ลงทะเบียนใบหน้า</h3>
-        <button class="modal-close" onclick="closeFaceRegModal()">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
-        </button>
+        <h3 id="preview-title">ยืนยันการลงเวลา</h3>
+        <button class="modal-close" id="modal-preview-close">&times;</button>
       </div>
-      <div class="modal-body">
-        <div id="face-reg-emp-info" class="face-reg-emp-info"></div>
-
-        <div class="camera-wrapper reg-camera">
-          <video id="reg-video" autoplay muted playsinline class="camera-video"></video>
-          <canvas id="reg-canvas" class="camera-overlay"></canvas>
-          <div class="camera-frame">
-            <div class="frame-corner tl"></div>
-            <div class="frame-corner tr"></div>
-            <div class="frame-corner bl"></div>
-            <div class="frame-corner br"></div>
-          </div>
+      <div class="modal-body preview-body">
+        <div class="preview-emp-info" id="preview-emp-info"></div>
+        <div class="preview-img-wrap">
+          <img id="preview-img" src="" alt="รูปถ่าย" class="preview-img" />
         </div>
-
-        <div class="capture-progress">
-          <div class="capture-dots" id="capture-dots">
-            <div class="capture-dot" id="dot-0"></div>
-            <div class="capture-dot" id="dot-1"></div>
-            <div class="capture-dot" id="dot-2"></div>
-            <div class="capture-dot" id="dot-3"></div>
-            <div class="capture-dot" id="dot-4"></div>
-          </div>
-          <p id="reg-status-text" class="reg-status-text">จัดวางใบหน้าในกรอบ แล้วกดปุ่มจับภาพ</p>
-        </div>
+        <div class="preview-timestamp" id="preview-timestamp"></div>
+        <p class="preview-hint">ตรวจสอบรูปและข้อมูลก่อนยืนยัน</p>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-outline" onclick="closeFaceRegModal()">ยกเลิก</button>
-        <button id="btn-capture" class="btn btn-primary" onclick="captureForRegistration()">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <circle cx="12" cy="12" r="10"/>
-            <circle cx="12" cy="12" r="3"/>
-          </svg>
-          จับภาพ (0/5)
-        </button>
+        <button class="btn btn-outline" id="btn-retake">ถ่ายใหม่</button>
+        <button class="btn btn-primary" id="btn-confirm-save">✓ ยืนยันบันทึก</button>
       </div>
     </div>
   </div>
 
-  <!-- Confirm Delete Modal -->
-  <div id="modal-confirm" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'modal-confirm')">
-    <div class="modal modal-sm">
+  <!-- ========== MODAL: VIEW PHOTO ========== -->
+  <div class="modal-backdrop hidden" id="modal-view-photo">
+    <div class="modal modal-photo">
       <div class="modal-header">
-        <h3>ยืนยันการลบ</h3>
+        <h3 id="view-photo-title">รูปถ่ายลงเวลา</h3>
+        <button class="modal-close" id="modal-view-photo-close">&times;</button>
       </div>
-      <div class="modal-body">
-        <p id="confirm-message">คุณต้องการลบรายการนี้หรือไม่?</p>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-outline" onclick="closeModal('modal-confirm')">ยกเลิก</button>
-        <button class="btn btn-danger" id="btn-confirm-action">ลบ</button>
+      <div class="modal-body preview-body">
+        <img id="view-photo-img" src="" alt="รูปถ่าย" class="preview-img" />
+        <div class="preview-timestamp" id="view-photo-info"></div>
       </div>
     </div>
   </div>
 
-  <!-- Toast Container -->
+  <!-- Toast -->
   <div id="toast-container" class="toast-container"></div>
 
-  <!-- Scripts -->
-  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
